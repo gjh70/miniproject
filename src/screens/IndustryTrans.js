@@ -11,7 +11,7 @@ import {
   Alert,
   Modal,
   ScrollView,
-  TextInput, // Ensure TextInput is imported
+  TextInput,
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import { useNavigation, useIsFocused } from '@react-navigation/native';
@@ -46,8 +46,8 @@ const IndustryTrans = () => {
   const [selectedFarmer, setSelectedFarmer] = useState(null);
   const [isFetchingDetails, setIsFetchingDetails] = useState(false);
   const [farmerDetails, setFarmerDetails] = useState({
-    creditScore: null,
-    feedback: null,
+    creditScore: null, // Stores the average credit score
+    feedback: [], // Stores an array of feedback objects
     name: null,
     contact: null,
     email: null,
@@ -57,13 +57,12 @@ const IndustryTrans = () => {
   const [modalActiveTab, setModalActiveTab] = useState('Details');
   const [isApproving, setIsApproving] = useState(false);
 
-  // --- State for Feedback Modal ---
+  // State for Feedback Modal
   const [isFeedbackModalVisible, setIsFeedbackModalVisible] = useState(false);
   const [selectedContractForFeedback, setSelectedContractForFeedback] = useState(null);
   const [feedbackText, setFeedbackText] = useState('');
-  const [feedbackRating, setFeedbackRating] = useState(''); // Store rating as string initially
+  const [feedbackRating, setFeedbackRating] = useState('');
   const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false);
-  // --- End Feedback Modal State ---
 
   // Fetch All Data (Shortlist, Contracts, History, Industry Name)
   const fetchAllData = useCallback(
@@ -158,7 +157,7 @@ const IndustryTrans = () => {
       setSelectedFarmer(applicantData);
       setFarmerDetails({
         creditScore: null,
-        feedback: null,
+        feedback: [],
         name: null,
         contact: null,
         email: null,
@@ -170,11 +169,12 @@ const IndustryTrans = () => {
       setIsDetailModalVisible(true);
       try {
         const farmerRef = firestore().collection('Farmers').doc(farmerId);
-        const [creditScoreSnapshot, feedbackSnapshot, farmerDocSnapshot] = await Promise.all([
-          farmerRef.collection('creditScore').limit(1).get(),
-          farmerRef.collection('feedback').limit(1).get(),
+        const [feedbackSnapshot, farmerDocSnapshot] = await Promise.all([
+          farmerRef.collection('feedback').orderBy('timestamp', 'desc').get(), // Fetch all feedback
           farmerRef.get(),
         ]);
+
+        // Fetch farmer details
         let fetchedName = null,
           fetchedContact = null,
           fetchedEmail = null,
@@ -190,13 +190,32 @@ const IndustryTrans = () => {
         } else {
           fetchedName = applicantData.farmerName;
         }
-        let score = 'N/A';
-        if (!creditScoreSnapshot.empty) score = creditScoreSnapshot.docs[0].data()?.scoreValue ?? 'N/A';
-        let fb = 'No feedback found.';
-        if (!feedbackSnapshot.empty) fb = feedbackSnapshot.docs[0].data()?.feedbackText ?? 'N/A';
+
+        // Fetch all feedback and compute average credit score from feedback
+        let feedbackList = [];
+        let averageCreditScore = 'N/A';
+        if (!feedbackSnapshot.empty) {
+          feedbackList = feedbackSnapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data(),
+            timestamp: doc.data().timestamp?.toDate ? doc.data().timestamp.toDate().toLocaleString() : 'N/A',
+          }));
+
+          // Compute average credit score from feedback entries
+          const scores = feedbackList
+            .map(fb => fb.creditScore)
+            .filter(score => typeof score === 'number' && !isNaN(score));
+          if (scores.length > 0) {
+            const total = scores.reduce((sum, score) => sum + score, 0);
+            averageCreditScore = (total / scores.length).toFixed(1); // Round to 1 decimal place
+          }
+        } else {
+          feedbackList = [{ id: 'no-feedback', feedbackText: 'No feedback found.' }];
+        }
+
         setFarmerDetails({
-          creditScore: score,
-          feedback: fb,
+          creditScore: averageCreditScore,
+          feedback: feedbackList,
           name: fetchedName || 'N/A',
           contact: fetchedContact || 'N/A',
           email: fetchedEmail || 'N/A',
@@ -208,7 +227,7 @@ const IndustryTrans = () => {
         Alert.alert('Fetch Error', 'Could not fetch full farmer details.');
         setFarmerDetails({
           creditScore: 'Error',
-          feedback: 'Error',
+          feedback: [{ id: 'error', feedbackText: 'Error fetching feedback.' }],
           name: applicantData.farmerName || 'Error',
           contact: 'Error',
           email: 'Error',
@@ -221,12 +240,13 @@ const IndustryTrans = () => {
     },
     []
   );
+
   const handleCloseModal = useCallback(() => {
     setIsDetailModalVisible(false);
     setSelectedFarmer(null);
     setFarmerDetails({
       creditScore: null,
-      feedback: null,
+      feedback: [],
       name: null,
       contact: null,
       email: null,
@@ -236,6 +256,7 @@ const IndustryTrans = () => {
     setModalActiveTab('Details');
     setIsApproving(false);
   }, []);
+
   const handleApproveApplicant = async () => {
     if (!selectedFarmer || !industryId || !selectedFarmer.id || !selectedFarmer.farmerId) {
       Alert.alert('Error', 'Cannot approve. Data missing.');
@@ -302,7 +323,7 @@ const IndustryTrans = () => {
     }
   };
 
-  // --- Feedback Modal Handlers ---
+  // Feedback Modal Handlers
   const handleCompletePress = useCallback((contractItem) => {
     if (!contractItem || !contractItem.farmerId) {
       Alert.alert('Error', 'Farmer details missing.');
@@ -311,7 +332,7 @@ const IndustryTrans = () => {
     console.log(`Opening feedback modal for contract: ${contractItem.id}, Farmer: ${contractItem.farmerId}`);
     setSelectedContractForFeedback(contractItem);
     setFeedbackText('');
-    setFeedbackRating(''); // Reset rating
+    setFeedbackRating('');
     setIsFeedbackModalVisible(true);
   }, []);
 
@@ -319,12 +340,11 @@ const IndustryTrans = () => {
     setIsFeedbackModalVisible(false);
     setSelectedContractForFeedback(null);
     setFeedbackText('');
-    setFeedbackRating(''); // Reset rating
+    setFeedbackRating('');
     setIsSubmittingFeedback(false);
   }, []);
 
   const handleSubmitContractFeedback = async () => {
-    // --- Validation ---
     const ratingValue = parseInt(feedbackRating, 10);
     if (!feedbackText.trim()) {
       Alert.alert('Input Required', 'Please enter feedback comments.');
@@ -343,7 +363,6 @@ const IndustryTrans = () => {
       console.error('Feedback Submit Error: Missing data', { selectedContractForFeedback, industryId });
       return;
     }
-    // --- End Validation ---
 
     const contractId = selectedContractForFeedback.id;
     const farmerIdForFeedback = selectedContractForFeedback.farmerId;
@@ -372,7 +391,7 @@ const IndustryTrans = () => {
         loanAmount: selectedContractForFeedback.loanAmount || 0,
         cropCultivated: selectedContractForFeedback.cropCultivated || 'N/A',
         feedbackText: feedbackText.trim(),
-        creditScore: ratingValue, // Store numeric rating
+        creditScore: ratingValue,
         timestamp: firestore.FieldValue.serverTimestamp(),
       });
       const farmerLoanRef = firestore()
@@ -396,9 +415,8 @@ const IndustryTrans = () => {
       setIsSubmittingFeedback(false);
     }
   };
-  // --- End Feedback Handlers ---
 
-  // --- Render List Item Function ---
+  // Render List Item Function
   const renderListItem = useCallback(
     ({ item }) => {
       const isShortlistedTab = activeViewTab === 'Shortlisted';
@@ -478,7 +496,7 @@ const IndustryTrans = () => {
     navigation?.getState()?.routes[navigation?.getState()?.index]?.name || null;
   const currentRoute = getCurrentRouteName();
 
-  // --- Loading State ---
+  // Loading State
   if (isLoading && !isRefreshing) {
     return (
       <View style={styles.centered}>
@@ -488,7 +506,7 @@ const IndustryTrans = () => {
     );
   }
 
-  // --- Initial Error State ---
+  // Initial Error State
   if (error && !isRefreshing && shortlistedApplicants.length === 0 && currentContracts.length === 0 && contractHistory.length === 0) {
     return (
       <View style={styles.container}>
@@ -527,7 +545,7 @@ const IndustryTrans = () => {
     );
   }
 
-  // --- Main Render ---
+  // Main Render
   return (
     <View style={styles.container}>
       {/* Header */}
@@ -718,21 +736,54 @@ const IndustryTrans = () => {
                   )}
                   {modalActiveTab === 'CreditScore' && (
                     <View>
-                      <Text style={styles.modalDetailLabel}>Credit Score:</Text>
+                      <Text style={styles.modalDetailLabel}>Average Credit Score:</Text>
                       {isFetchingDetails ? (
                         <ActivityIndicator size="small" color="green" style={styles.detailLoader} />
                       ) : (
-                        <Text style={styles.modalDetailValue}>{farmerDetails.creditScore ?? '...'}</Text>
+                        <View style={styles.creditScoreContainer}>
+                          <Text style={styles.creditScoreValue}>
+                            {farmerDetails.creditScore ?? '...'}
+                          </Text>
+                          {farmerDetails.creditScore !== 'N/A' && farmerDetails.creditScore !== 'Error' && (
+                            <Text style={styles.creditScoreUnit}>/ 5</Text>
+                          )}
+                        </View>
                       )}
                     </View>
                   )}
                   {modalActiveTab === 'Feedback' && (
                     <View>
-                      <Text style={styles.modalDetailLabel}>General Feedback:</Text>
+                      <Text style={styles.modalDetailLabel}>Feedback History:</Text>
                       {isFetchingDetails ? (
                         <ActivityIndicator size="small" color="green" style={styles.detailLoader} />
                       ) : (
-                        <Text style={styles.modalDetailValue}>{farmerDetails.feedback ?? '...'}</Text>
+                        farmerDetails.feedback.map((fb) => (
+                          <View key={fb.id} style={styles.feedbackItem}>
+                            <Text style={styles.feedbackText}>
+                              {fb.feedbackText || 'No feedback text available.'}
+                            </Text>
+                            {fb.industryName && (
+                              <Text style={styles.feedbackMeta}>
+                                From: {fb.industryName}
+                              </Text>
+                            )}
+                            {fb.creditScore && (
+                              <Text style={styles.feedbackMeta}>
+                                Rating: {fb.creditScore}/5
+                              </Text>
+                            )}
+                            {fb.timestamp && (
+                              <Text style={styles.feedbackMeta}>
+                                Date: {fb.timestamp}
+                              </Text>
+                            )}
+                            {fb.cropCultivated && fb.loanAmount && (
+                              <Text style={styles.feedbackMeta}>
+                                Contract: {fb.cropCultivated} - ₹{fb.loanAmount.toLocaleString()}
+                              </Text>
+                            )}
+                          </View>
+                        ))
                       )}
                     </View>
                   )}
@@ -767,7 +818,7 @@ const IndustryTrans = () => {
         </View>
       </Modal>
 
-      {/* --- Feedback Modal --- */}
+      {/* Feedback Modal */}
       <Modal
         animationType="slide"
         transparent={true}
@@ -847,7 +898,6 @@ const IndustryTrans = () => {
           </View>
         </View>
       </Modal>
-      {/* --- End Feedback Modal --- */}
 
       {/* Bottom Navigation */}
       <View style={styles.bottomNav}>
@@ -882,7 +932,7 @@ const IndustryTrans = () => {
   );
 };
 
-// --- Stylesheet ---
+// Stylesheet
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F8F9FA' },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20, backgroundColor: '#F8F9FA' },
@@ -900,7 +950,7 @@ const styles = StyleSheet.create({
     borderBottomColor: '#E0E0E0',
     backgroundColor: '#FFFFFF',
     paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 0) + 5 : 50,
-    zIndex: 1, // Ensure header stays on top
+    zIndex: 1,
   },
   headerTitle: { fontSize: 18, fontWeight: '600', color: '#333' },
   refreshButton: { padding: 8 },
@@ -910,8 +960,8 @@ const styles = StyleSheet.create({
     borderBottomColor: '#E0E0E0',
     backgroundColor: '#FFFFFF',
     justifyContent: 'space-around',
-    height: 50, // Explicit height to ensure visibility
-    zIndex: 1, // Ensure tabs stay above content
+    height: 50,
+    zIndex: 1,
   },
   tab: {
     paddingVertical: 14,
@@ -944,7 +994,7 @@ const styles = StyleSheet.create({
     zIndex: 10,
   },
   refreshErrorText: { color: '#721C24', fontSize: 13, textAlign: 'center' },
-  contentArea: { flex: 1, backgroundColor: '#F8F9FA' }, // Ensure content area doesn't overlap
+  contentArea: { flex: 1, backgroundColor: '#F8F9FA' },
   listStyle: { flex: 1 },
   listContentContainer: { paddingTop: 8, paddingBottom: 80, paddingHorizontal: 16, flexGrow: 1 },
   emptyComponentContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
@@ -1022,6 +1072,43 @@ const styles = StyleSheet.create({
   submitFeedbackButton: { backgroundColor: '#28a745', borderRadius: 8, paddingVertical: 14, alignItems: 'center', minHeight: 48, justifyContent: 'center', flex: 1, marginRight: 8 },
   submitFeedbackButtonText: { color: 'white', fontSize: 16, fontWeight: 'bold' },
   modalSubtitle: { fontSize: 14, color: '#666', textAlign: 'center', marginBottom: 15 },
+  // Styles for Feedback Display in Modal
+  feedbackItem: {
+    backgroundColor: '#f9f9f9',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+  },
+  feedbackText: {
+    fontSize: 15,
+    color: '#333',
+    marginBottom: 6,
+    lineHeight: 20,
+  },
+  feedbackMeta: {
+    fontSize: 13,
+    color: '#666',
+    marginTop: 2,
+    fontStyle: 'italic',
+  },
+  // Styles for Credit Score Display
+  creditScoreContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  creditScoreValue: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#2e7d32', // Green color for emphasis
+    marginRight: 5,
+  },
+  creditScoreUnit: {
+    fontSize: 16,
+    color: '#555',
+  },
 });
 
 export default IndustryTrans;
