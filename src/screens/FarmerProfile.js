@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react'; // Added useCallback
 import {
     View,
     Text,
@@ -8,6 +8,7 @@ import {
     ActivityIndicator,
     Alert,
     Platform,
+    StatusBar, // Added StatusBar
 } from 'react-native';
 
 import FeatherIcon from 'react-native-vector-icons/Feather';
@@ -18,72 +19,75 @@ import { useNavigation, useIsFocused } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import firestore from '@react-native-firebase/firestore';
 
+// --- Crop Icon Mapping ---
 const cropIconMap = {
-    corn: 'corn', maize: 'corn', wheat: 'grain', rice: 'rice',
-    soybean: 'soybean', apple: 'food-apple', tomato: 'food-variant',
-    potato: 'food-variant', paddy: 'leaf',
+    corn: 'corn', maize: 'corn', wheat: 'barley', grain: 'barley', rice: 'rice', // Adjusted wheat/grain
+    soybean: 'soybean', apple: 'food-apple', tomato: 'food-variant', // Keeping tomato/potato generic for now
+    potato: 'food-variant', paddy: 'leaf', fruit: 'food-apple', vegetable: 'carrot', // Added common ones
 };
 const getCropIconName = (cropName) => {
     const lowerCaseCrop = cropName?.toLowerCase() || '';
     for (const key in cropIconMap) {
-        if (lowerCaseCrop.includes(key)) {
-            return cropIconMap[key];
-        }
+        if (lowerCaseCrop.includes(key)) { return cropIconMap[key]; }
     }
-    return 'leaf';
+    return 'leaf'; // Default icon
 };
+// --- End Crop Icon Mapping ---
 
-// Simple Circular Progress Component (Score out of 5)
-const CircularProgress = ({ score, size }) => {
+
+// --- Circular Progress Component (Updated to handle loading/no score) ---
+const CircularProgress = ({ score, size, isLoading, hasError }) => {
     const maxScore = 5;
     const radius = size / 2;
     const strokeWidth = 8;
-    const circumference = 2 * Math.PI * (radius - strokeWidth / 2);
-    const progress = (score / maxScore) * 100; // Convert to percentage
-    const strokeDashoffset = circumference - (progress / 100) * circumference;
+
+    let displayText = '';
+    let progressColor = '#e0e0e0'; // Default to background color
+
+    if (isLoading) {
+        displayText = '...'; // Indicate loading
+    } else if (hasError) {
+        displayText = 'Error';
+        progressColor = '#d32f2f'; // Error color
+    } else if (score !== null && score >= 0) {
+        displayText = `${score.toFixed(1)}/5`; // Format score to 1 decimal
+        progressColor = '#0f9b6e'; // Progress color
+    } else {
+        displayText = 'N/A'; // No score available
+    }
+
+    // Simplified progress indication: Use color fill instead of complex SVG paths for simplicity here
+    // A more accurate circular progress would require react-native-svg
+    const progressStyle = score !== null && score > 0 && !isLoading && !hasError
+        ? { borderColor: progressColor }
+        : { borderColor: '#e0e0e0' }; // Show only background if no score or loading/error
 
     return (
         <View style={{ width: size, height: size, justifyContent: 'center', alignItems: 'center' }}>
             {/* Background Circle */}
-            <View style={{
-                width: size,
-                height: size,
-                borderRadius: radius,
-                borderWidth: strokeWidth,
-                borderColor: '#e0e0e0',
-                position: 'absolute',
-            }} />
-            {/* Progress Circle */}
-            <View style={{
-                width: size,
-                height: size,
-                borderRadius: radius,
-                borderWidth: strokeWidth,
-                borderColor: '#0f9b6e',
-                borderStyle: 'solid',
-                position: 'absolute',
-                transform: [{ rotate: '-90deg' }],
-                borderTopColor: '#0f9b6e',
-                borderRightColor: score > 2.5 ? '#0f9b6e' : 'transparent',
-                borderBottomColor: score > 3.75 ? '#0f9b6e' : 'transparent',
-                borderLeftColor: score > 1.25 ? '#0f9b6e' : 'transparent',
-            }} />
-            {/*physics: true,
-            strokeDasharray: `${circumference},${circumference}`,
-            strokeDashoffset: `${strokeDashoffset}`,
-            strokeLinecap: 'round',
-            {/* Score Text */}
-            <Text style={{
-                position: 'absolute',
-                fontSize: size / 3,
-                fontWeight: '700',
-                color: '#333',
-            }}>
-                {score}/5
+            <View style={[styles.progressCircleBase, { width: size, height: size, borderRadius: radius, borderWidth: strokeWidth }]} />
+            {/* Progress Indicator (Simplified: just uses the border color change) */}
+            {/* For a real progress arc, SVG is needed. This is a visual approximation */}
+            <View style={[
+                styles.progressCircleBase,
+                 {
+                    width: size,
+                    height: size,
+                    borderRadius: radius,
+                    borderWidth: strokeWidth,
+                    position: 'absolute',
+                 },
+                 progressStyle // Apply dynamic border color
+             ]} />
+             {/* Score Text */}
+            <Text style={[styles.progressText, { fontSize: size / 3.5, color: isLoading || hasError || score === null ? '#999' : '#333' }]}>
+                {displayText}
             </Text>
         </View>
     );
 };
+// --- End Circular Progress Component ---
+
 
 const FarmerProfileScreen = () => {
     const navigation = useNavigation();
@@ -94,119 +98,205 @@ const FarmerProfileScreen = () => {
     const [farmerData, setFarmerData] = useState(null);
     const [isLoadingProfile, setIsLoadingProfile] = useState(true);
     const [profileError, setProfileError] = useState(null);
+
     const [feedbackItems, setFeedbackItems] = useState([]);
-    const [isLoadingFeedback, setIsLoadingFeedback] = useState(false);
+    const [isLoadingFeedback, setIsLoadingFeedback] = useState(false); // Separate loading for feedback
     const [feedbackError, setFeedbackError] = useState(null);
     const [hasFetchedFeedback, setHasFetchedFeedback] = useState(false);
+    const [averageCreditScore, setAverageCreditScore] = useState(null); // State for average score
 
-    // Dummy credit score (out of 5)
-    const dummyCreditScore = 3.5; // Example score out of 5
-
-    useEffect(() => {
-        const fetchFarmerProfile = async () => {
-            if (!isFocused) return;
-            console.log("Profile Screen focused. Fetching farmer profile...");
-            setIsLoadingProfile(true);
-            setProfileError(null);
-            setFarmerData(null);
-            setFarmerId(null);
-            setFeedbackItems([]);
-            setHasFetchedFeedback(false);
-            setFeedbackError(null);
-            setIsLoadingFeedback(false);
-
-            try {
-                const id = await AsyncStorage.getItem('loggedInUserId');
-                if (!id) { throw new Error('User ID not found. Please log in again.'); }
-                console.log(`Retrieved User ID: ${id}`);
-                setFarmerId(id);
-                console.log(`Fetching Firestore document: Farmers/${id}`);
-                const farmerDoc = await firestore().collection('Farmers').doc(id).get();
-
-                if (farmerDoc.exists) {
-                    console.log("Farmer profile document found.");
-                    const data = farmerDoc.data();
-                    // Add dummy credit score to farmerData
-                    setFarmerData({ ...data, creditScore: dummyCreditScore });
-                } else {
-                    console.log("Farmer profile document does NOT exist.");
-                    setProfileError('Your profile data was not found.');
-                    Alert.alert('Error', 'Profile data missing. Logging out.', [
-                        { text: 'OK', onPress: () => navigation.replace('FarmerLogin') }
-                    ]);
-                    return;
-                }
-            } catch (error) {
-                console.error("Error fetching farmer profile:", error);
-                setProfileError(`Error loading profile: ${error.message}`);
-                Alert.alert('Error', `Failed to load profile: ${error.message}. Logging out.`, [
-                    { text: 'OK', onPress: () => navigation.replace('FarmerLogin') }
-                ]);
-            } finally {
-                setIsLoadingProfile(false);
-            }
-        };
-
-        fetchFarmerProfile();
-    }, [isFocused, navigation]);
-
-    const fetchFeedback = async () => {
-        if (!farmerId) {
+    // --- Fetch Feedback Function ---
+    const fetchFeedback = useCallback(async (currentFarmerId) => {
+        if (!currentFarmerId) {
             setFeedbackError("Cannot load feedback: Farmer ID missing.");
-            setHasFetchedFeedback(true); return;
+            setHasFetchedFeedback(true); setIsLoadingFeedback(false); setAverageCreditScore(null); return;
         }
-        if (isLoadingFeedback) return;
+        // Don't check isLoadingFeedback here if called automatically after profile load
 
-        console.log(`Fetching feedback from subcollection: Farmers/${farmerId}/feedback`);
-        setIsLoadingFeedback(true);
-        setFeedbackError(null);
-        setFeedbackItems([]);
+        console.log(`Fetching feedback: Farmers/${currentFarmerId}/feedback`);
+        setIsLoadingFeedback(true); setFeedbackError(null); setFeedbackItems([]); setAverageCreditScore(null); // Reset
 
         try {
             const querySnapshot = await firestore()
                 .collection('Farmers')
-                .doc(farmerId)
+                .doc(currentFarmerId)
                 .collection('feedback')
                 .orderBy('timestamp', 'desc')
                 .limit(50)
                 .get();
 
+            let totalScore = 0;
+            let scoreCount = 0;
             const items = querySnapshot.docs.map(doc => {
                 const data = doc.data();
                 const timestamp = data.timestamp instanceof firestore.Timestamp
                                     ? data.timestamp.toDate()
                                     : null;
+                // Calculate average score
+                if (typeof data.creditScore === 'number' && data.creditScore >= 0 && data.creditScore <= 5) { // Allow 0 score, check range
+                    totalScore += data.creditScore;
+                    scoreCount++;
+                }
                 return {
                     id: doc.id,
                     industryName: data.industryName || 'Unknown Industry',
                     feedbackText: data.feedbackText || '*No feedback text*',
-                    creditScore: data.creditScore,
+                    creditScore: data.creditScore, // Keep original score
                     timestamp: timestamp,
                 };
             });
 
-            console.log(`Fetched ${items.length} feedback items.`);
+            console.log(`Fetched ${items.length} feedback items. Found ${scoreCount} valid scores.`);
             setFeedbackItems(items);
+            if (scoreCount > 0) {
+                const avg = totalScore / scoreCount;
+                setAverageCreditScore(parseFloat(avg.toFixed(1))); // Calculate and set average
+                console.log(`Average Score: ${avg.toFixed(1)}`);
+            } else {
+                setAverageCreditScore(null); // No valid scores found
+                console.log(`No valid scores found for average calculation.`);
+            }
+            setFeedbackError(null); // Clear previous errors
         } catch (error) {
             console.error("Error fetching feedback subcollection:", error);
+            setAverageCreditScore(null); // Reset score on error
             if (error.code === 'failed-precondition') {
                 setFeedbackError("Database index required for sorting feedback. Check Firestore console.");
-            } else {
+                // Avoid alert if loading automatically
+            } else if (error.code === 'permission-denied') {
+                setFeedbackError("Permission denied accessing feedback.");
+             } else {
                 setFeedbackError("Could not load feedback data.");
             }
         } finally {
             setIsLoadingFeedback(false);
             setHasFetchedFeedback(true);
         }
-    };
+    }, []); // End useCallback for fetchFeedback
 
-    const handleViewTabPress = (tabName) => {
+    // --- Fetch Profile Effect ---
+    useEffect(() => {
+        const fetchFarmerProfile = async () => {
+            if (!isFocused) return;
+
+            console.log("FarmerProfileScreen: Focused. Fetching profile...");
+            setIsLoadingProfile(true);
+            setProfileError(null);
+            setFarmerData(null);
+            setFarmerId(null);
+            // Reset feedback related state
+            setFeedbackItems([]);
+            setHasFetchedFeedback(false);
+            setFeedbackError(null);
+            setIsLoadingFeedback(false);
+            setAverageCreditScore(null);
+            setActiveViewTab('Overview');
+
+            let fetchedId = null; // Temp variable for ID
+
+            try {
+                const id = await AsyncStorage.getItem('loggedInUserId');
+                if (!id) {
+                    // Handle missing ID more gracefully if possible, but logout is often necessary
+                    console.error('FarmerProfileScreen: loggedInUserId not found.');
+                    Alert.alert("Session Expired", "Please log in again.");
+                    // Use timeout to allow state update before navigation
+                    setTimeout(() => navigation.replace('FarmerLogin'), 0);
+                    return; // Stop execution
+                }
+                fetchedId = id;
+                setFarmerId(id);
+
+                console.log(`Fetching Firestore document: Farmers/${id}`);
+                const farmerDoc = await firestore().collection('Farmers').doc(id).get();
+
+                if (farmerDoc.exists) {
+                    console.log("Farmer profile document found.");
+                    setFarmerData(farmerDoc.data()); // Set farmer data WITHOUT dummy score
+                    setProfileError(null);
+                    // --- Trigger feedback fetch AFTER profile is loaded ---
+                    console.log("Profile loaded, initiating feedback fetch for average score...");
+                    fetchFeedback(fetchedId); // Pass the confirmed ID
+                    // --- End feedback fetch trigger ---
+                } else {
+                    console.log(`Farmer profile document for ID ${id} NOT found.`);
+                    // Handle profile not found - maybe navigate to edit screen or show specific message
+                    setProfileError('Your profile data was not found. Please create or edit your profile.');
+                    setFarmerData(null); // Ensure farmerData is null
+                    setHasFetchedFeedback(true); // Still mark feedback as 'checked'
+                    // Consider navigating to edit screen:
+                    // navigation.navigate('FarmerProfileEdit');
+                }
+            } catch (error) {
+                console.error("Error fetching farmer profile:", error);
+                setAverageCreditScore(null); // Reset score on error
+                setHasFetchedFeedback(true); // Mark as checked
+                setProfileError(`Error loading profile: ${error.message}. Check connection or log in again.`);
+                setFarmerData(null);
+                // Optional: Alert or navigate on critical errors
+                // Alert.alert('Error', `Failed to load profile: ${error.message}.`);
+                 // Consider logout only for specific errors like permissions
+                 // if (error.code === 'permission-denied') {
+                 //   setTimeout(() => navigation.replace('FarmerLogin'), 0);
+                 // }
+            } finally {
+                setIsLoadingProfile(false);
+            }
+        };
+
+        fetchFarmerProfile();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isFocused, navigation, fetchFeedback]); // Add fetchFeedback dependency
+
+    // --- Handle Tab Press ---
+     const handleViewTabPress = (tabName) => {
         setActiveViewTab(tabName);
+        // Fetch feedback if switching to Feedback tab AND it hasn't been fetched successfully yet,
+        // OR if there was a previous error trying to fetch.
         if (tabName === 'Feedback' && (!hasFetchedFeedback || feedbackError)) {
-            fetchFeedback();
+             if (farmerId && !isLoadingFeedback) { // Only fetch if ID exists and not already loading
+                fetchFeedback(farmerId);
+            }
         }
     };
 
+     // --- Retry Profile Load --- (Optional, but good practice)
+    const retryProfileLoad = () => {
+        console.log("Retrying profile load...");
+        setIsLoadingProfile(true);
+        setProfileError(null); setFarmerData(null); setFarmerId(null);
+        setFeedbackItems([]); setHasFetchedFeedback(false); setFeedbackError(null);
+        setIsLoadingFeedback(false); setActiveViewTab('Overview'); setAverageCreditScore(null);
+
+        const fetchAgain = async () => {
+             let fetchedId = null;
+             try {
+                const id = await AsyncStorage.getItem('loggedInUserId');
+                if (!id) { console.error('Retry: ID not found.'); Alert.alert("Session Expired", "Log in again."); setTimeout(() => navigation.replace('FarmerLogin'), 0); return; }
+                fetchedId = id;
+                setFarmerId(id);
+                const farmerDoc = await firestore().collection('Farmers').doc(id).get();
+                if (farmerDoc.exists) {
+                    setFarmerData(farmerDoc.data());
+                    setProfileError(null);
+                    console.log("Profile re-loaded, initiating feedback fetch...");
+                    fetchFeedback(fetchedId); // Fetch feedback after successful retry
+                } else {
+                    setProfileError('Profile data not found.');
+                    setFarmerData(null);
+                    setHasFetchedFeedback(true); // Mark as checked
+                }
+            } catch (error) {
+                 setHasFetchedFeedback(true); // Mark as checked on error
+                 setProfileError(`Retry failed: ${error.message}`); setFarmerData(null);
+                 setAverageCreditScore(null);
+            }
+            finally { setIsLoadingProfile(false); }
+        };
+        fetchAgain();
+    };
+
+    // --- Render Loading State ---
     if (isLoadingProfile) {
         return (
             <View style={styles.centered}>
@@ -216,29 +306,90 @@ const FarmerProfileScreen = () => {
         );
     }
 
+    // --- Render Profile Error State (More specific handling) ---
     if (profileError && !farmerData) {
+        // Differentiate between 'not found' and other errors
+        const isNotFoundError = profileError.includes('not found');
         return (
-            <View style={styles.centered}>
-                <Icon name="error-outline" size={50} color="#cc0000" />
-                <Text style={styles.errorText}>{profileError}</Text>
+            <View style={styles.container}>
+                 <View style={styles.header}>
+                    {/* Minimal header for error/not found state */}
+                    <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
+                         <FeatherIcon name="arrow-left" size={24} color="#fff" />
+                    </TouchableOpacity>
+                     <Text style={styles.headerTitle}>{isNotFoundError ? 'Create Profile' : 'Profile Error'}</Text>
+                     <View style={styles.headerSpacer} />
+                 </View>
+                 <View style={styles.centered}>
+                    <Icon name={isNotFoundError ? "person-add-alt-1" : "error-outline"} size={50} color={isNotFoundError ? "#aaa" : "#cc0000"} />
+                    <Text style={styles.errorText}>{profileError}</Text>
+                    {isNotFoundError ? (
+                        <TouchableOpacity
+                            style={styles.editButton}
+                            onPress={() => navigation.navigate('FarmerProfileEdit', { farmerId: farmerId })} // Pass potential ID if available
+                        >
+                            <FeatherIcon name="edit-2" size={20} color="#fff" />
+                            <Text style={styles.editButtonText}>Create / Edit Profile</Text>
+                        </TouchableOpacity>
+                    ) : (
+                         <TouchableOpacity
+                            style={[styles.editButton, { backgroundColor: '#6c757d', marginTop: 10 }]}
+                            onPress={retryProfileLoad} // Provide retry for other errors
+                         >
+                            <Icon name="refresh" size={20} color="#fff" style={{marginRight: 5}}/>
+                            <Text style={styles.editButtonText}>Retry Load</Text>
+                         </TouchableOpacity>
+                    )}
+                 </View>
+                 {/* Keep Bottom Nav accessible */}
+                <View style={styles.bottomNav}>
+                    {[
+                        { name: 'Home', icon: 'home', screen: 'FarmerHome' },
+                        { name: 'Transaction', icon: 'account-balance-wallet', screen: 'FarmerTrans' },
+                        { name: 'Profile', icon: 'person-outline', screen: 'FarmerProfile' },
+                        { name: 'Help', icon: 'help-outline', screen: 'FarmerHelp' },
+                    ].map((tab) => {
+                        const isTabActive = navigation.getState()?.routes[navigation.getState()?.index]?.name === tab.screen;
+                        return (
+                            <TouchableOpacity
+                                key={tab.name}
+                                style={styles.navItem}
+                                onPress={() => { if (!isTabActive) navigation.navigate(tab.screen); }}
+                            >
+                                <Icon name={tab.icon} size={28} color={isTabActive ? '#0f9b6e' : 'gray'} /> {/* Updated active color */}
+                                <Text style={[styles.navText, isTabActive && styles.activeNavText]}>{tab.name}</Text>
+                            </TouchableOpacity>
+                        );
+                    })}
+                </View>
             </View>
         );
     }
 
+     // Fallback if data is somehow null after loading without error (should be rare)
     if (!farmerData) {
         return (
             <View style={styles.centered}>
                 <Icon name="person-off" size={50} color="#aaa" />
-                <Text style={styles.errorText}>Profile data unavailable.</Text>
+                <Text style={styles.errorText}>Profile data unavailable. Try reloading.</Text>
+                 <TouchableOpacity
+                    style={[styles.editButton, { backgroundColor: '#6c757d', marginTop: 10 }]}
+                    onPress={retryProfileLoad}
+                 >
+                     <Icon name="refresh" size={20} color="#fff" style={{marginRight: 5}}/>
+                    <Text style={styles.editButtonText}>Reload</Text>
+                 </TouchableOpacity>
             </View>
         );
     }
 
+
+    // --- Render Main Profile Screen ---
     const name = farmerData?.name || 'N/A';
     const location = farmerData?.location || 'Location not set';
     const contact = farmerData?.contact || 'Contact not set';
-    const crops = farmerData?.rawMaterials || [];
-    const creditScore = farmerData?.creditScore || 0;
+    const crops = farmerData?.rawMaterials || []; // Assuming 'rawMaterials' field holds crops
+    // creditScore is now from state: averageCreditScore
 
     return (
         <View style={styles.container}>
@@ -252,16 +403,18 @@ const FarmerProfileScreen = () => {
             </View>
 
             {/* Tabs */}
-            <View style={styles.tabs}>
+             <View style={styles.tabs}>
                 <TouchableOpacity style={styles.tabButton} onPress={() => handleViewTabPress('Overview')}>
-                    <Text style={[styles.tab, activeViewTab === 'Overview' && styles.activeTab]}>
+                    <Text style={[styles.tabText, activeViewTab === 'Overview' && styles.activeTabText]}>
                         Overview
                     </Text>
+                     {activeViewTab === 'Overview' && <View style={styles.activeTabIndicator} />}
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.tabButton} onPress={() => handleViewTabPress('Feedback')}>
-                    <Text style={[styles.tab, activeViewTab === 'Feedback' && styles.activeTab]}>
+                    <Text style={[styles.tabText, activeViewTab === 'Feedback' && styles.activeTabText]}>
                         Feedback
                     </Text>
+                     {activeViewTab === 'Feedback' && <View style={styles.activeTabIndicator} />}
                 </TouchableOpacity>
             </View>
 
@@ -269,6 +422,7 @@ const FarmerProfileScreen = () => {
             <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 120 }}>
                 {activeViewTab === 'Overview' && (
                     <View style={styles.sectionCard}>
+                        {/* Profile Header */}
                         <View style={styles.profileHeader}>
                             <View style={styles.avatar}>
                                 <Icon name="person" size={40} color="#0f9b6e" />
@@ -282,13 +436,26 @@ const FarmerProfileScreen = () => {
                             </View>
                         </View>
 
-                        {/* Credit Score */}
+                        {/* Average Credit Score */}
                         <View style={styles.sectionDivider} />
-                        <Text style={styles.sectionTitle}>Credit Score</Text>
+                        <Text style={styles.sectionTitle}>Average Rating</Text>
                         <View style={styles.creditScoreContainer}>
-                            <CircularProgress score={creditScore} size={100} />
+                            <CircularProgress
+                                score={averageCreditScore}
+                                size={100}
+                                isLoading={isLoadingFeedback && !hasFetchedFeedback} // Loading only initially
+                                hasError={!!feedbackError} // Pass error status
+                             />
+                             {/* Optional: Add text explanation */}
+                             {!isLoadingFeedback && feedbackError && (
+                                <Text style={[styles.errorText, {fontSize: 14, marginTop: 8}]}>Could not load rating</Text>
+                             )}
+                             {!isLoadingFeedback && !feedbackError && averageCreditScore === null && hasFetchedFeedback &&(
+                                <Text style={styles.noDataTextSmall}>No ratings received yet</Text>
+                             )}
                         </View>
 
+                        {/* Contact Info */}
                         <View style={styles.sectionDivider} />
                         <Text style={styles.sectionTitle}>Contact Information</Text>
                         <View style={styles.contactCard}>
@@ -296,6 +463,7 @@ const FarmerProfileScreen = () => {
                             <Text style={styles.contactText}>{contact}</Text>
                         </View>
 
+                        {/* Crops Grown */}
                         <View style={styles.sectionDivider} />
                         <Text style={styles.sectionTitle}>Crops Grown</Text>
                         <View style={styles.materialsList}>
@@ -313,7 +481,8 @@ const FarmerProfileScreen = () => {
                     </View>
                 )}
 
-                {activeViewTab === 'Feedback' && (
+                 {/* --- Feedback Tab Content (Remains mostly the same) --- */}
+                 {activeViewTab === 'Feedback' && (
                     <View style={styles.sectionCard}>
                         <Text style={styles.sectionTitle}>Feedback Received</Text>
                         {isLoadingFeedback && (
@@ -323,7 +492,11 @@ const FarmerProfileScreen = () => {
                             <View style={styles.centeredFeedbackMessage}>
                                 <Icon name="error-outline" size={32} color="#cc0000" />
                                 <Text style={styles.errorText}>{feedbackError}</Text>
-                                <TouchableOpacity onPress={fetchFeedback} style={styles.retryFeedbackButton}>
+                                <TouchableOpacity
+                                     onPress={() => farmerId && fetchFeedback(farmerId)} // Retry with ID
+                                     style={styles.retryFeedbackButton}
+                                     disabled={isLoadingFeedback} // Disable while loading
+                                >
                                     <Text style={styles.retryButtonText}>Retry</Text>
                                 </TouchableOpacity>
                             </View>
@@ -340,11 +513,13 @@ const FarmerProfileScreen = () => {
                                     <View key={item.id} style={styles.feedbackItem}>
                                         <View style={styles.feedbackHeader}>
                                             <Text style={styles.feedbackSender}>{item.industryName}</Text>
-                                            {typeof item.creditScore === 'number' && item.creditScore > 0 && (
+                                            {/* Display individual rating if available */}
+                                            {typeof item.creditScore === 'number' && item.creditScore >= 0 && item.creditScore <= 5 && ( // Check range
                                                 <View style={styles.feedbackRating}>
-                                                    <Text style={styles.ratingText}>{item.creditScore}</Text>
+                                                    {/* Optional: Display numeric score next to stars */}
+                                                    {/* <Text style={styles.ratingText}>{item.creditScore.toFixed(1)}</Text> */}
                                                     {[...Array(5)].map((_, i) => (
-                                                        <Icon key={i} name={i < item.creditScore ? 'star' : 'star-border'} size={18} color="#ffca28" />
+                                                        <Icon key={i} name={i < Math.round(item.creditScore) ? 'star' : 'star-border'} size={18} color="#ffca28" />
                                                     ))}
                                                 </View>
                                             )}
@@ -386,7 +561,7 @@ const FarmerProfileScreen = () => {
                             style={styles.navItem}
                             onPress={() => { if (!isTabActive) navigation.navigate(tab.screen); }}
                         >
-                            <Icon name={tab.icon} size={28} color={isTabActive ? 'green' : 'gray'} />
+                            <Icon name={tab.icon} size={28} color={isTabActive ? '#0f9b6e' : 'gray'} /> {/* Updated active color */}
                             <Text style={[styles.navText, isTabActive && styles.activeNavText]}>{tab.name}</Text>
                         </TouchableOpacity>
                     );
@@ -396,10 +571,12 @@ const FarmerProfileScreen = () => {
     );
 };
 
+// --- Stylesheet ---
 const styles = StyleSheet.create({
     container: {
         flex: 1,
         backgroundColor: '#fafafa',
+        paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0, // Handle Android status bar
     },
     centered: {
         flex: 1,
@@ -420,60 +597,62 @@ const styles = StyleSheet.create({
         color: '#d32f2f',
         textAlign: 'center',
         lineHeight: 24,
+        paddingHorizontal: 20, // Prevent long errors overflowing
     },
     header: {
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'space-between',
-        paddingVertical: 15,
-        paddingTop: Platform.OS === 'android' ? 40 : 50,
-        paddingHorizontal: 20,
+        paddingVertical: 12, // Slightly reduced padding
+        paddingHorizontal: 15,
         backgroundColor: '#0f9b6e',
-        elevation: 4,
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.2,
-        shadowRadius: 4,
+        // Removed explicit paddingTop, handled by container paddingTop
+        // elevation: 4, // Keep elevation/shadow
+        // shadowColor: '#000',
+        // shadowOffset: { width: 0, height: 2 },
+        // shadowOpacity: 0.2,
+        // shadowRadius: 4,
     },
     backButton: {
-        padding: 8,
+        padding: 8, // Make tap area larger
+        marginLeft: -5, // Adjust alignment
     },
     headerTitle: {
-        fontSize: 22,
-        fontWeight: '700',
+        fontSize: 20, // Slightly smaller title
+        fontWeight: 'bold', // Use bold instead of 700
         color: '#fff',
-        letterSpacing: 0.5,
+        textAlign: 'center',
     },
     headerSpacer: {
-        width: 40,
+        width: 40, // Keep for centering
     },
-    tabs: {
+     tabs: {
         flexDirection: 'row',
-        justifyContent: 'center',
+        justifyContent: 'space-around', // Distribute tabs evenly
         backgroundColor: '#fff',
-        paddingVertical: 10,
         borderBottomWidth: 1,
         borderBottomColor: '#e0e0e0',
-        elevation: 2,
     },
     tabButton: {
-        paddingHorizontal: 25,
-        paddingVertical: 12,
-        borderRadius: 20,
-        marginHorizontal: 5,
+        flex: 1, // Make buttons take equal width
+        alignItems: 'center', // Center text
+        paddingVertical: 15, // Adjust padding as needed
     },
-    tab: {
+    tabText: {
         fontSize: 16,
         color: '#777',
         fontWeight: '600',
     },
-    activeTab: {
+    activeTabText: {
         color: '#0f9b6e',
         fontWeight: '700',
-        backgroundColor: '#e8f5e9',
-        paddingHorizontal: 12,
-        paddingVertical: 6,
-        borderRadius: 15,
+    },
+    activeTabIndicator: { // Simple underline indicator
+        height: 3,
+        width: '60%', // Adjust width as needed
+        backgroundColor: '#0f9b6e',
+        marginTop: 5,
+        borderRadius: 1.5,
     },
     content: {
         flex: 1,
@@ -481,25 +660,25 @@ const styles = StyleSheet.create({
     },
     sectionCard: {
         backgroundColor: '#fff',
-        borderRadius: 15,
+        borderRadius: 12, // Slightly smaller radius
         padding: 20,
-        marginTop: 20,
+        marginTop: 15, // Reduced margin
         marginBottom: 10,
-        elevation: 4,
+        elevation: 3, // Slightly reduced elevation
         shadowColor: '#000',
-        shadowOffset: { width: 0, height: 3 },
-        shadowOpacity: 0.15,
-        shadowRadius: 6,
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.1,
+        shadowRadius: 5,
     },
     profileHeader: {
         flexDirection: 'row',
         alignItems: 'center',
-        marginBottom: 20,
+        marginBottom: 15, // Reduced margin
     },
     avatar: {
-        width: 60,
-        height: 60,
-        borderRadius: 30,
+        width: 55, // Slightly smaller avatar
+        height: 55,
+        borderRadius: 27.5,
         backgroundColor: '#e8f5e9',
         justifyContent: 'center',
         alignItems: 'center',
@@ -509,49 +688,66 @@ const styles = StyleSheet.create({
         flex: 1,
     },
     farmerName: {
-        fontSize: 26,
-        fontWeight: '700',
+        fontSize: 24, // Slightly smaller name
+        fontWeight: 'bold',
         color: '#222',
-        marginBottom: 5,
+        marginBottom: 4,
     },
     infoRow: {
         flexDirection: 'row',
         alignItems: 'center',
     },
     location: {
-        fontSize: 16,
-        color: 'black',
+        fontSize: 15, // Slightly smaller location text
+        color: '#555', // Darker gray
         marginLeft: 8,
         fontWeight: '500',
     },
     sectionDivider: {
         height: 1,
         backgroundColor: '#eceff1',
-        marginVertical: 20,
+        marginVertical: 15, // Reduced margin
     },
     sectionTitle: {
-        fontSize: 19,
-        fontWeight: '700',
+        fontSize: 18, // Slightly smaller title
+        fontWeight: 'bold',
         color: '#333',
-        marginBottom: 15,
-        letterSpacing: 0.3,
+        marginBottom: 12, // Reduced margin
+        letterSpacing: 0.2,
     },
+    // --- Credit Score / Progress Circle Styles ---
     creditScoreContainer: {
         alignItems: 'center',
-        marginBottom: 20,
+        marginVertical: 10, // Add some vertical margin
     },
+    progressCircleBase: {
+        borderColor: '#e0e0e0', // Background color
+        borderStyle: 'solid',
+    },
+    progressText: {
+        position: 'absolute',
+        fontWeight: '700',
+        textAlign: 'center',
+    },
+    noDataTextSmall: { // For inline messages like 'No ratings'
+        fontSize: 14,
+        color: '#999',
+        fontStyle: 'italic',
+        marginTop: 8,
+    },
+    // --- End Credit Score Styles ---
     contactCard: {
         flexDirection: 'row',
         alignItems: 'center',
         backgroundColor: '#f1f8e9',
         padding: 15,
-        borderRadius: 12,
-        marginBottom: 20,
+        borderRadius: 10, // Slightly smaller radius
+        // marginBottom: 15, // Removed mb, handled by divider
         borderWidth: 1,
         borderColor: '#dcedc8',
     },
     contactText: {
-        fontSize: 16,
+        fontSize: 15, // Slightly smaller
         color: '#444',
         marginLeft: 12,
         fontWeight: '500',
@@ -560,30 +756,31 @@ const styles = StyleSheet.create({
         flexDirection: 'row',
         flexWrap: 'wrap',
         justifyContent: 'flex-start',
-        gap: 15,
+        gap: 12, // Slightly reduced gap
     },
     materialItem: {
         alignItems: 'center',
-        width: 90,
-        padding: 12,
+        width: 85, // Slightly smaller item
+        padding: 10, // Reduced padding
         backgroundColor: '#f1f8e9',
-        borderRadius: 12,
+        borderRadius: 10,
         borderWidth: 1,
         borderColor: '#dcedc8',
     },
     materialLabel: {
-        marginTop: 8,
-        fontSize: 14,
+        marginTop: 6, // Reduced margin
+        fontSize: 13, // Smaller label
         color: '#333',
         fontWeight: '600',
         textAlign: 'center',
     },
-    noDataText: {
-        fontSize: 16,
+    noDataText: { // For empty lists (crops, feedback)
+        fontSize: 15, // Slightly smaller
         color: '#999',
         fontStyle: 'italic',
         textAlign: 'center',
-        marginVertical: 25,
+        marginVertical: 20, // Reduced margin
+        width: '100%', // Ensure full width
     },
     editButton: {
         flexDirection: 'row',
@@ -592,30 +789,30 @@ const styles = StyleSheet.create({
         backgroundColor: '#0f9b6e',
         paddingVertical: 14,
         paddingHorizontal: 20,
-        borderRadius: 12,
+        borderRadius: 10, // Consistent radius
         marginHorizontal: 15,
         marginVertical: 15,
-        elevation: 5,
+        elevation: 4, // Slightly reduced elevation
         shadowColor: '#000',
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.25,
-        shadowRadius: 5,
+        shadowOffset: { width: 0, height: 3 },
+        shadowOpacity: 0.2,
+        shadowRadius: 4,
     },
     editButtonText: {
-        fontWeight: '700',
+        fontWeight: 'bold',
         color: '#fff',
         fontSize: 16,
         marginLeft: 8,
-        letterSpacing: 0.5,
+        letterSpacing: 0.4,
     },
     bottomNav: {
         flexDirection: 'row',
         justifyContent: 'space-around',
         borderTopWidth: 1,
         borderColor: '#e0e0e0',
-        paddingVertical: 8,
-        backgroundColor: '#fff',
+        paddingTop: 8,
         paddingBottom: Platform.OS === 'ios' ? 25 : 10,
+        backgroundColor: '#fff',
     },
     navItem: {
         alignItems: 'center',
@@ -628,15 +825,17 @@ const styles = StyleSheet.create({
         marginTop: 3,
     },
     activeNavText: {
-        color: '#0f9b6e',
+        color: '#0f9b6e', // Ensure active color matches theme
         fontWeight: '600',
     },
+    // --- Feedback Styles ---
     feedbackLoader: {
         marginVertical: 30,
     },
     centeredFeedbackMessage: {
         alignItems: 'center',
         marginVertical: 25,
+        paddingHorizontal: 20, // Add padding for text wrapping
     },
     retryFeedbackButton: {
         marginTop: 15,
@@ -656,49 +855,51 @@ const styles = StyleSheet.create({
     },
     feedbackItem: {
         backgroundColor: '#fff',
-        borderRadius: 12,
+        borderRadius: 10, // Consistent radius
         padding: 15,
-        marginBottom: 15,
+        marginBottom: 12, // Slightly reduced margin
         borderWidth: 1,
-        borderColor: '#e0e0e0',
-        elevation: 2,
+        borderColor: '#e8e8e8', // Lighter border
+        elevation: 1, // Minimal elevation
         shadowColor: '#000',
         shadowOffset: { width: 0, height: 1 },
-        shadowOpacity: 0.1,
-        shadowRadius: 3,
+        shadowOpacity: 0.08,
+        shadowRadius: 2,
     },
     feedbackHeader: {
         flexDirection: 'row',
         justifyContent: 'space-between',
         alignItems: 'center',
-        marginBottom: 10,
+        marginBottom: 8, // Reduced margin
     },
     feedbackSender: {
-        fontSize: 16,
+        fontSize: 15, // Slightly smaller
         fontWeight: '600',
         color: '#333',
         flexShrink: 1,
+        marginRight: 10,
     },
     feedbackRating: {
         flexDirection: 'row',
         alignItems: 'center',
     },
-    ratingText: {
-        fontSize: 15,
+    ratingText: { // Numeric rating next to stars (currently commented out in JSX)
+        fontSize: 14,
         fontWeight: '600',
         color: '#ffca28',
-        marginRight: 5,
+        marginRight: 4,
     },
     feedbackComment: {
-        fontSize: 15,
+        fontSize: 14, // Slightly smaller comment text
         color: '#555',
-        lineHeight: 22,
+        lineHeight: 20, // Adjust line height
         marginBottom: 8,
     },
     feedbackTimestamp: {
-        fontSize: 12,
-        color: '#999',
+        fontSize: 11, // Smaller timestamp
+        color: '#aaa', // Lighter gray
         textAlign: 'right',
+        marginTop: 4,
     },
 });
 
